@@ -4,6 +4,11 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "릴리즈 버전 (예: v1.0). 비우면 빌드만 하고 릴리즈는 만들지 않음"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -45,6 +50,7 @@ jobs:
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
           $ver = "1.0.0"
           if ($env:GITHUB_REF -like "refs/tags/v*") { $ver = $env:GITHUB_REF_NAME.TrimStart("v") }
+          elseif ("${{ github.event.inputs.version }}" -ne "") { $ver = "${{ github.event.inputs.version }}".TrimStart("v") }
           & $iscc "/DAppVersion=$ver" installer.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup 실패" }
           Move-Item dist/WebPConverter-Windows-Setup.exe WebPConverter-Windows-Setup.exe
@@ -84,7 +90,9 @@ jobs:
             ${{ matrix.artifact }}.dmg
 
   release:
-    if: startsWith(github.ref, 'refs/tags/')
+    # 태그를 올렸을 때, 또는 수동 실행에서 버전을 적었을 때 릴리즈를 만든다 (태그가 없으면 새로 만듦)
+    # 일부 빌드가 실패해도 성공한 설치 파일은 올린다 (취소된 경우만 제외)
+    if: ${{ !cancelled() && (startsWith(github.ref, 'refs/tags/') || github.event.inputs.version != '') }}
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -93,6 +101,9 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || github.event.inputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: WebP·PNG 변환기 ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || github.event.inputs.version }}
           files: |
             *.zip
             *.exe
