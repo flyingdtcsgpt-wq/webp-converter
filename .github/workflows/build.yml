@@ -1,0 +1,99 @@
+name: Build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: WebPConverter-Windows
+          - os: macos-latest          # Apple Silicon (M1~)
+            artifact: WebPConverter-macOS-AppleSilicon
+          - os: macos-15-intel        # Intel Mac
+            artifact: WebPConverter-macOS-Intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $opts = "--noconfirm --windowed --name WebPConverter --collect-all tkinterdnd2 --collect-all pillow_heif --collect-all oxipng --collect-all imagequant --collect-all py7zr"
+          # 1) 폴더형 포터블 (시작이 빠름, 추천)
+          Invoke-Expression "pyinstaller $opts --onedir app.py"
+          Copy-Item PORTABLE.txt dist/WebPConverter/사용법.txt
+          Compress-Archive -Path dist/WebPConverter -DestinationPath WebPConverter-Windows-Portable.zip
+          # 설치 파일 (Inno Setup)
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress }
+          $ver = "1.0.0"
+          if ($env:GITHUB_REF -like "refs/tags/v*") { $ver = $env:GITHUB_REF_NAME.TrimStart("v") }
+          & $iscc "/DAppVersion=$ver" installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup 실패" }
+          Move-Item dist/WebPConverter-Windows-Setup.exe WebPConverter-Windows-Setup.exe
+          # 2) 단일 파일형
+          Invoke-Expression "pyinstaller $opts --onefile app.py"
+          Move-Item dist/WebPConverter.exe WebPConverter-Windows-SingleFile.exe
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller --noconfirm --windowed --name WebPConverter --osx-bundle-identifier com.local.webpconverter --collect-all tkinterdnd2 --collect-all pillow_heif --collect-all oxipng --collect-all imagequant --collect-all py7zr app.py
+          mkdir -p pack/WebPConverter-macOS
+          cp -R dist/WebPConverter.app pack/WebPConverter-macOS/
+          cp PORTABLE.txt pack/WebPConverter-macOS/사용법.txt
+          (cd pack && ditto -c -k --keepParent WebPConverter-macOS ../${{ matrix.artifact }}.zip)
+          # 설치용 dmg (앱 + Applications 바로가기)
+          mkdir -p dmg
+          cp -R dist/WebPConverter.app dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "WebPConverter" -srcfolder dmg -ov -format UDZO ${{ matrix.artifact }}.dmg
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            WebPConverter-Windows-Setup.exe
+            WebPConverter-Windows-Portable.zip
+            WebPConverter-Windows-SingleFile.exe
+
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.zip
+            ${{ matrix.artifact }}.dmg
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.zip
+            *.exe
+            *.dmg
