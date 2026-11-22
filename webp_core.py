@@ -221,9 +221,9 @@ class _Reference:
     - 큰 이미지: 탐색은 표본 타일 모자이크(proxy)로 싸게 하고, 최종 결과는 score_full() 로 이미지 전체를 측정"""
     blur = 0.0
 
-    def __init__(self, img: Image.Image):
+    def __init__(self, img: Image.Image, proxy: Image.Image | None = None):
         self.img = img
-        self.proxy = _sample_tiles(img)
+        self.proxy = _sample_tiles(img) if proxy is None else proxy
         self.whole = self.proxy is img
         a = self.a = _luma(self._prep(self.proxy))
         aa = a * a
@@ -414,6 +414,33 @@ def _finish_large(img, extra, ref, score, sizes: dict, target: float, floor_q: i
     return data, s, q
 
 
+MINI_GUIDE_MIN_PX = 600_000  # 이 크기 이상인 이미지는 작은 표본으로 탐색 시작점을 먼저 잡는다
+
+
+def _guided_start(img: Image.Image, target: float, floor_q: int, level: str) -> int:
+    """정밀 탐색을 시작할 품질값. 이미지가 어느 정도 크면 4×4 표본 타일(면적 15~20%)로 대략 찾아서,
+    정밀 탐색이 정답 근처에서 시작하게 한다. 최종 결과는 정밀 탐색이 이미지 전체로 확인하므로
+    시작점이 빗나가도 결과는 같고 시간만 조금 더 든다."""
+    start = _start_q(level)
+    if not MINI_GUIDE or img.size[0] * img.size[1] < MINI_GUIDE_MIN_PX:
+        return start
+    mini = _sample_tiles(img, max_px=0, n=4)
+    if mini is img:
+        return start
+    ref = _Reference(img, proxy=mini)
+    cache: dict[int, float] = {}
+
+    def score(q: int) -> float:
+        if q not in cache:
+            cache[q] = ref.score(_lossy(mini, {}, q))
+        return cache[q]
+
+    return _search_min_q(score, target, floor_q, start)
+
+
+MINI_GUIDE = True
+
+
 def _smart(img: Image.Image, extra: dict, level: str, lossless_src: bool,
            orig_bytes: int) -> tuple[bytes, str]:
     target, floor_q = SMART_LEVELS.get(level, SMART_LEVELS["balanced"])
@@ -449,7 +476,7 @@ def _smart(img: Image.Image, extra: dict, level: str, lossless_src: bool,
 
     fallback_q = max(UNREACHABLE_Q, floor_q)
     if whole:
-        best_q = _search_min_q(score, target, floor_q, _start_q(level))
+        best_q = _search_min_q(score, target, floor_q, _guided_start(img, target, floor_q, level))
         final_ssim = score(best_q)
         lossy = blobs[best_q]
         lossy_ok = final_ssim >= target
