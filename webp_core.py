@@ -80,7 +80,7 @@ class Settings:
     mode: str = "smart"            # smart | quality | lossless
     smart_level: str = "best"      # best | balanced | small
     quality: int = 85              # mode == quality 일 때
-    resize_mode: str = "none"      # none | long | width | height | percent | fit
+    resize_mode: str = "none"      # none | long | width | height | percent | fit | cover
     width: int = 0
     height: int = 0
     long_side: int = 1920
@@ -89,6 +89,10 @@ class Settings:
     keep_metadata: bool = True
     output_dir: Optional[str] = None  # None 이면 원본과 같은 폴더
     overwrite: bool = False
+    # 자르기 (일괄): 비율 (가로, 세로) 예) (16, 9). None 이면 자르지 않음
+    crop_ratio: Optional[tuple] = None
+    crop_anchor: str = "center"      # center | smart (디테일이 많은 쪽을 남김)
+    crop_flip_portrait: bool = True  # 세로 사진에는 비율을 뒤집어 적용 (16:9 → 9:16)
 
 
 @dataclass
@@ -114,8 +118,16 @@ def target_size(w: int, h: int, s: Settings) -> tuple[int, int]:
     m = s.resize_mode
     if m == "none":
         nw, nh = w, h
+    elif m == "cover" and s.width > 0 and s.height > 0 and abs(w / h - s.width / s.height) < 0.01:
+        # 꽉 채우기: 이미 W:H 비율로 잘린 상태 → 정확히 W×H 로 (확대 금지면 원본보다 크게는 안 함)
+        k = s.width / w
+        if s.no_upscale and k > 1:
+            nw, nh = w, h
+        else:
+            nw, nh = s.width, s.height
     else:
-        if m == "fit" and s.width > 0 and s.height > 0:  # 가로×세로 상자 안에 비율 유지
+        # 꽉 채우기인데 비율이 다른 경우(이 사진만 '자르지 않기'로 지정 등)는 상자 안에 맞춤으로 처리
+        if m in ("fit", "cover") and s.width > 0 and s.height > 0:  # 가로×세로 상자 안에 비율 유지
             k = min(s.width / w, s.height / h)
         elif m == "long" and s.long_side > 0:
             k = s.long_side / max(w, h)
@@ -140,6 +152,106 @@ def _resize(img: Image.Image, size: tuple[int, int]) -> Image.Image:
         return img
     # RGBA 는 Pillow 가 내부적으로 premultiplied 처리 → 가장자리 번짐 없음
     return img.resize(size, Image.LANCZOS, reducing_gap=3.0)
+
+
+# ---------------------------------------------------------------- 자르기
+# 자르기 영역은 '회전을 반영한 원본' 기준의 비율 좌표 (x0, y0, x1, y1), 각 0~1 로 다룬다.
+# 그래서 JPEG 를 축소 디코딩했거나 미리보기처럼 작은 이미지에서도 같은 영역을 가리킨다.
+
+def crop_ratio_for(w: int, h: int, s: Settings) -> Optional[tuple]:
+    """이 이미지에 적용할 자르기 비율. 없으면 None."""
+    if s.resize_mode == "cover" and s.width > 0 and s.height > 0:
+        return (s.width, s.height)  # 꽉 채우기는 W:H 로 자르는 것과 같다 (비율 뒤집기 없음)
+    if not s.crop_ratio:
+        return None
+    rw, rh = s.crop_ratio
+    if s.crop_flip_portrait and (rw - rh) * (w - h) < 0:  # 가로 비율인데 세로 사진(또는 반대)
+        rw, rh = rh, rw
+    return rw, rh
+
+
+def _crop_extent(w: int, h: int, ratio) -> tuple[float, float]:
+    """비율대로 자를 때 남는 가로·세로 비율 (1 이면 그 방향은 안 자름)."""
+    R = ratio[0] / ratio[1]
+    if abs(w / h - R) < 1e-3:
+        return 1.0, 1.0
+    if w / h > R:
+        return (h * R) / w, 1.0
+    return 1.0, (w / R) / h
+
+
+def _smart_offset(img: Image.Image, horizontal: bool, frac: float) -> float:
+    """잘라낼 방향(가로/세로)에서 디테일(경계선)이 가장 많이 들어오는 위치 (0~1-frac).
+    가운데 쪽을 약간 선호해서, 고르게 복잡한 사진은 가운데를 남긴다."""
+    g = img.convert("L")
+    g.thumbnail((256, 256))
+    a = np.asarray(g, dtype=np.float32)
+    if min(a.shape) < 3:
+        return (1 - frac) / 2
+    e = np.zeros_like(a)
+    e[:, 1:] += np.abs(np.diff(a, axis=1))
+    e[1:, :] += np.abs(np.diff(a, axis=0))
+    prof = e.sum(axis=0) if horizontal else e.sum(axis=1)
+    L = prof.size
+    n = max(1, min(L, round(L * frac)))
+    if n >= L:
+        return 0.0
+    cs = np.concatenate([[0.0], np.cumsum(prof, dtype=np.float64)])
+    sums = cs[n:] - cs[:-n]  # 위치별 창 안의 디테일 합
+    pos = np.arange(sums.size)
+    centre = (L - n) / 2
+    weight = 1 - 0.15 * np.abs(pos - centre) / max(centre, 1)
+    best = int(np.argmax(sums * weight))
+    return best / L
+
+
+def auto_crop_box(img: Image.Image, s: Settings) -> Optional[tuple]:
+    """일괄 설정에 따른 자르기 영역 (비율 좌표). 자를 필요가 없으면 None."""
+    w, h = img.size
+    ratio = crop_ratio_for(w, h, s)
+    if not ratio:
+        return None
+    fw, fh = _crop_extent(w, h, ratio)
+    if fw >= 1 and fh >= 1:
+        return None
+    if fw < 1:
+        x0 = _smart_offset(img, True, fw) if s.crop_anchor == "smart" else (1 - fw) / 2
+        return (x0, 0.0, x0 + fw, 1.0)
+    y0 = _smart_offset(img, False, fh) if s.crop_anchor == "smart" else (1 - fh) / 2
+    return (0.0, y0, 1.0, y0 + fh)
+
+
+def _crop_fraction(w: int, h: int, s: Settings, crop) -> tuple[float, float]:
+    """자른 뒤 남는 가로·세로 비율 (이미지 내용을 보지 않고 계산 - 축소 디코딩 판단용)."""
+    if crop == "none":
+        return 1.0, 1.0
+    if isinstance(crop, tuple):
+        return crop[2] - crop[0], crop[3] - crop[1]
+    ratio = crop_ratio_for(w, h, s)
+    return _crop_extent(w, h, ratio) if ratio else (1.0, 1.0)
+
+
+def _apply_crop(img: Image.Image, box) -> Image.Image:
+    if not box:
+        return img
+    w, h = img.size
+    x0, y0 = int(round(box[0] * w)), int(round(box[1] * h))
+    x1, y1 = int(round(box[2] * w)), int(round(box[3] * h))
+    x0, y0 = min(max(x0, 0), w - 1), min(max(y0, 0), h - 1)
+    x1, y1 = min(max(x1, x0 + 1), w), min(max(y1, y0 + 1), h)
+    if (x0, y0, x1, y1) == (0, 0, w, h):
+        return img
+    return img.crop((x0, y0, x1, y1))
+
+
+def _crop_label(box, s: Settings, crop) -> str:
+    if not box:
+        return ""
+    if isinstance(crop, tuple):
+        return " · ✂ 직접 지정"
+    if s.resize_mode == "cover":
+        return ""
+    return " · ✂ 자름"
 
 
 # ---------------------------------------------------------------- 화질 측정 (SSIM)
@@ -725,9 +837,9 @@ def set_big_image_limit(n: int):
     _big_sem = threading.BoundedSemaphore(max(1, n))
 
 
-def _jpeg_draft(im: Image.Image, s: Settings):
+def _jpeg_draft(im: Image.Image, s: Settings, crop=None):
     """JPEG 를 크게 줄일 때는 처음부터 1/2·1/4·1/8 크기로 디코딩 (화질 차이 없이 2~4배 빠름).
-    최종 크기의 2배 이상은 남겨서 LANCZOS 축소 화질을 유지."""
+    최종 크기의 2배 이상은 남겨서 LANCZOS 축소 화질을 유지. (자르기가 있으면 자른 영역 기준)"""
     if im.format not in ("JPEG", "MPO") or s.resize_mode == "none":
         return
     w, h = im.size
@@ -736,26 +848,29 @@ def _jpeg_draft(im: Image.Image, s: Settings):
     except Exception:
         swap = False
     tw, th = (h, w) if swap else (w, h)
-    nw, nh = target_size(tw, th, s)
-    k = max(nw / tw, nh / th)
+    fw, fh = _crop_fraction(tw, th, s, crop)
+    cw, ch = max(1, round(tw * fw)), max(1, round(th * fh))
+    nw, nh = target_size(cw, ch, s)
+    k = max(nw / cw, nh / ch)
     if k < 0.5:
         im.draft("RGB", (int(w * k * 2) + 1, int(h * k * 2) + 1))
 
 
-def convert(src: Path | str, s: Settings, dst: Path | None = None) -> Result:
-    """src 를 변환해 저장. dst 를 주면 그 경로에 저장 (압축 파일 내부 처리용)."""
+def convert(src: Path | str, s: Settings, dst: Path | None = None, crop=None) -> Result:
+    """src 를 변환해 저장. dst 를 주면 그 경로에 저장 (압축 파일 내부 처리용).
+    crop: None = 일괄 설정대로, "none" = 이 파일은 자르지 않음, (x0, y0, x1, y1) = 직접 지정한 영역(0~1)"""
     src = Path(src)
     res = Result(src=src)
     try:
         res.orig_bytes = src.stat().st_size
         with Image.open(src) as im:
             res.orig_size = im.size
-            _jpeg_draft(im, s)
+            _jpeg_draft(im, s, crop)
             big = im.size[0] * im.size[1] >= BIG_IMAGE_PX
             if big:
                 _big_sem.acquire()
             try:
-                data, detail, new_size, res.orig_size = _convert_image(im, src, s, res)
+                data, detail, new_size, res.orig_size = _convert_image(im, src, s, res, crop)
             finally:
                 if big:
                     _big_sem.release()
@@ -787,7 +902,7 @@ def _needs_transpose(im: Image.Image) -> bool:
         return True  # 판단할 수 없으면 Pillow 에 맡김
 
 
-def _convert_image(im: Image.Image, src: Path, s: Settings, res: Result):
+def _convert_image(im: Image.Image, src: Path, s: Settings, res: Result, crop=None):
     """열린 이미지를 변환. (데이터, 설명, 결과 크기, 회전 반영된 원본 크기) 반환."""
     full_w, full_h = res.orig_size  # draft 적용 전 원본 크기
     im.load()
@@ -796,7 +911,7 @@ def _convert_image(im: Image.Image, src: Path, s: Settings, res: Result):
     animated = (im.format in ("GIF", "PNG", "WEBP")
                 and getattr(im, "is_animated", False) and im.n_frames > 1)
     if animated:
-        data, detail, new_size = _convert_animated(im, s, extra)
+        data, detail, new_size = _convert_animated(im, s, extra, crop)
         return data, detail, new_size, (full_w, full_h)
 
     try:
@@ -807,7 +922,12 @@ def _convert_image(im: Image.Image, src: Path, s: Settings, res: Result):
     # 회전이 필요 없으면 exif_transpose 는 이미지를 통째로 복사만 한다 → 필요할 때만 호출
     img = ImageOps.exif_transpose(im) if _needs_transpose(im) else im
     img = _normalize_mode(img)
-    img = _resize(img, target_size(*orig_size, s))  # draft 로 줄어든 상태여도 목표는 원본 기준
+    box = None if crop == "none" else (crop if isinstance(crop, tuple) else auto_crop_box(img, s))
+    img = _apply_crop(img, box)
+    # 목표 크기는 '원본 해상도로 자른 크기' 기준 (draft 로 줄어든 상태여도 결과는 같아야 함)
+    cw = max(1, round(orig_size[0] * (box[2] - box[0]))) if box else orig_size[0]
+    ch = max(1, round(orig_size[1] * (box[3] - box[1]))) if box else orig_size[1]
+    img = _resize(img, target_size(cw, ch, s))
     new_size = img.size
     lossless_src = src.suffix.lower() in LOSSLESS_SOURCE_EXTS
     if s.out_format == "png":
@@ -819,15 +939,17 @@ def _convert_image(im: Image.Image, src: Path, s: Settings, res: Result):
         data, detail = _lossy(img, extra, q), f"손실 q{q}"
     else:
         data, detail = _smart(img, extra, s.smart_level, lossless_src, res.orig_bytes)
-    return data, detail, new_size, orig_size
+    return data, detail + _crop_label(box, s, crop), new_size, orig_size
 
 
-def _convert_animated(im: Image.Image, s: Settings, extra: dict):
+def _convert_animated(im: Image.Image, s: Settings, extra: dict, crop=None):
     frames, durations = [], []
-    size = target_size(*im.size, s)
+    first = im.convert("RGBA")
+    box = None if crop == "none" else (crop if isinstance(crop, tuple) else auto_crop_box(first, s))
+    size = target_size(*_apply_crop(first, box).size, s)  # 모든 프레임을 같은 영역으로 자름
     for fr in ImageSequence.Iterator(im):
         durations.append(fr.info.get("duration", im.info.get("duration", 100)) or 100)
-        frames.append(_resize(fr.convert("RGBA"), size))
+        frames.append(_resize(_apply_crop(fr.convert("RGBA"), box), size))
     extra = {k: v for k, v in extra.items() if k != "exif"}
     if s.out_format == "png":  # 움직이는 PNG (APNG)
         detail = "애니메이션 PNG 무손실"
@@ -847,7 +969,7 @@ def _convert_animated(im: Image.Image, s: Settings, extra: dict):
         extra.setdefault("icc_profile", None)  # 안 넘기면 Pillow 가 원본 것을 넣음
         frames[0].save(buf, "PNG", save_all=True, append_images=frames[1:], duration=durations,
                        loop=im.info.get("loop", 0), optimize=True, **extra)
-        return buf.getvalue(), f"{detail}, {len(frames)}프레임", size
+        return buf.getvalue(), f"{detail}, {len(frames)}프레임" + _crop_label(box, s, crop), size
     kw = dict(save_all=True, append_images=frames[1:], duration=durations,
               loop=im.info.get("loop", 0), method=4)
     if s.mode == "lossless":
@@ -861,7 +983,7 @@ def _convert_animated(im: Image.Image, s: Settings, extra: dict):
         kw.update(quality=q, allow_mixed=True)
         detail = f"애니메이션 혼합 q{q}"
     extra = {k: v for k, v in extra.items() if k != "exif"}
-    return _encode(frames[0], extra, **kw), f"{detail}, {len(frames)}프레임", size
+    return _encode(frames[0], extra, **kw), f"{detail}, {len(frames)}프레임" + _crop_label(box, s, crop), size
 
 
 def _accept(f: Path) -> bool:

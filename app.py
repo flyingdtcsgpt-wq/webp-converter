@@ -14,6 +14,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import webp_core as core
+from crop_editor import CropEditor
 
 try:  # 드래그 앤 드롭 (선택)
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -33,7 +34,8 @@ HELP_TOPICS = {
             "• [파일 추가] / [폴더 추가] 버튼을 쓰거나, 파일·폴더를 창에 끌어다 놓으세요.\n"
             "• 폴더는 하위 폴더까지 모두 포함됩니다.\n"
             "• 압축 파일(ZIP, CBZ, 7Z, CB7, TAR, TAR.GZ)을 넣으면 안의 이미지를 전부 변환합니다. (🗜 표시)\n"
-            "• 목록에서 Delete 키로 선택한 항목을 지우고, 더블클릭하면 파일 위치가 열립니다.\n"
+            "• 목록에서 Delete 키로 선택한 항목을 지웁니다. 사진을 더블클릭하면 개별 자르기 창이 열리고, "
+            "오른쪽 클릭 메뉴에서 결과·원본 파일 위치를 열 수 있습니다.\n"
             "• 설정을 고른 뒤 [▶ 변환 시작]을 누르세요. 결과가 원본보다 커진 파일은 주황색으로 표시됩니다."),
     "fmt": ("저장 형식",
             "• WebP: 같은 화질에서 용량이 가장 작습니다. 사진·웹 업로드에 추천합니다. "
@@ -63,8 +65,23 @@ HELP_TOPICS = {
                "• 긴 변 기준: 가로·세로 중 긴 쪽을 입력값에 맞춥니다. 예) 1280 → 가로 사진은 가로 1280px\n"
                "• 가로 기준 / 세로 기준: 해당 변을 입력값에 맞춥니다.\n"
                "• 비율(%): 예) 50이면 가로·세로가 절반이 됩니다.\n"
-               "• 가로×세로 안에 맞춤: 입력한 상자 안에 들어가게 줄입니다. 예) 1280×720\n\n"
+               "• 가로×세로 안에 맞춤: 입력한 상자 안에 들어가게 줄입니다. 예) 1280×720\n"
+               "• 가로×세로로 꽉 채우기: 입력한 크기에 정확히 맞추고 넘치는 부분은 자릅니다. "
+               "예) 1280×720 → 어떤 사진이든 정확히 1280×720 (자르는 위치는 '자르기'의 위치 설정)\n\n"
                "해상도를 줄이면 용량이 가장 크게 줄어듭니다. 수천만 화소 사진도 1280~1920px이면 화면용으로 충분합니다."),
+    "crop": ("자르기",
+             "원하는 비율로 사진을 자릅니다. 자른 뒤에 크기 조절이 적용됩니다.\n"
+             "예) 16:9 + '긴 변 1280' → 정확히 1280×720\n\n"
+             "• 일괄: 여기서 비율을 고르면 목록의 모든 사진(압축 파일 안 이미지 포함)에 적용됩니다.\n"
+             "• 위치: '가운데'는 정가운데를 남기고, '자동(피사체)'는 디테일이 많은 쪽(보통 피사체)을 남깁니다. "
+             "얼굴을 인식하는 기능은 아니라서 가끔 엉뚱하게 자를 수 있습니다.\n"
+             "• 사진 방향에 맞춰 비율 뒤집기: 가로·세로 사진이 섞여 있을 때, 세로 사진에는 16:9 대신 9:16 처럼 "
+             "뒤집어 적용합니다 (반대로 세로 비율을 고르면 가로 사진에는 가로로).\n\n"
+             "• 개별: 목록에서 사진을 더블클릭(또는 [✂ 개별 자르기])하면 미리보기 창이 열립니다. "
+             "박스를 끌어 위치·크기를 정하면 그 사진만 그렇게 자릅니다 (목록에 ✂ 표시). "
+             "일부 사진만 자르려면 일괄은 '자르지 않음'으로 두고, 자를 사진만 개별로 지정하세요.\n"
+             "• 오른쪽 클릭 메뉴: '이 사진은 자르지 않기', '일괄 설정대로 되돌리기'\n\n"
+             "원본 파일은 잘리지 않습니다. 결과 파일만 잘립니다."),
     "noup": ("원본보다 크게 확대하지 않음",
              "켜져 있으면 입력한 크기보다 작은 이미지는 확대하지 않고 그대로 둡니다. "
              "확대하면 용량만 늘고 화질은 좋아지지 않기 때문에, 보통 켜 두세요."),
@@ -93,7 +110,7 @@ HELP_TEXT = """\
 ■ 기본 안내
 • 원본 파일은 수정하거나 삭제하지 않습니다. 결과는 새 파일로 저장됩니다.
 • 같은 이름이 있으면 '이름_1.webp'처럼 번호를 붙여 저장합니다. ('같은 이름 파일 덮어쓰기'를 켜면 기존 파일을 덮어씁니다)
-• 변환이 끝난 뒤 목록에서 파일을 더블클릭하면 결과 위치가 열립니다.
+• 목록에서 사진을 더블클릭하면 개별 자르기 창이 열립니다. 결과 파일 위치는 오른쪽 클릭 메뉴에서 열 수 있습니다.
 • 각 옵션 옆의 파란 [?] 버튼을 누르면 그 항목의 설명이 나옵니다. (F1 키: 이 도움말 열기)
 
 ■ 화질·용량
@@ -108,6 +125,12 @@ HELP_TEXT = """\
 • 원본보다 크게 확대하지 않는 옵션이 켜져 있으면, 이미 작은 이미지는 크기가 그대로입니다.
 • 비율은 항상 유지됩니다. 가로×세로 상자를 지정하면 그 안에 맞춰집니다 (잘라내지 않음).
 • WebP는 한 변이 16,383px을 넘을 수 없어 그보다 크면 자동으로 줄입니다.
+
+■ 자르기
+• '자르기'에서 비율을 고르면 모든 사진을 그 비율로 자른 뒤 크기를 조절합니다. (원본은 그대로)
+• 사진별로 다르게 자르려면 목록에서 더블클릭하세요. 미리보기에서 박스를 끌어 지정하고, ←/→ 로 다음 사진으로 넘깁니다.
+• '자동(피사체)' 위치는 디테일이 많은 쪽을 남기는 방식이라 가끔 엉뚱하게 자를 수 있습니다. 중요한 사진은 개별로 확인하세요.
+• 압축 파일 안의 이미지는 일괄 설정만 적용됩니다.
 
 ■ 개인정보
 • 'EXIF·색상 프로파일 유지'를 켜면 촬영 위치(GPS)·카메라 정보도 파일에 남습니다. 인터넷에 올리거나 남에게 보낼 사진은 이 옵션을 끄세요.
@@ -183,6 +206,11 @@ RESIZE = [
     ("세로 기준 (px)", "height"),
     ("비율 (%)", "percent"),
     ("가로×세로 안에 맞춤", "fit"),
+    ("가로×세로 꽉 채우기", "cover"),
+]
+CROPS = [
+    ("자르지 않음", None), ("1:1 정사각형", (1, 1)), ("4:3", (4, 3)), ("3:2", (3, 2)), ("16:9", (16, 9)),
+    ("4:5 (인스타 세로)", (4, 5)), ("2:3", (2, 3)), ("9:16 (세로 영상)", (9, 16)), ("직접 입력", "custom"),
 ]
 
 
@@ -205,10 +233,11 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title(APP_NAME + (" (포터블)" if PORTABLE else ""))
-        root.geometry("980x680")
-        root.minsize(820, 560)
+        root.geometry("1000x740")
+        root.minsize(860, 620)
 
         self.items: dict[str, dict] = {}  # tree item id -> {path, kind, units, key, err}
+        self.crops: dict[str, object] = {}  # 사진별 자르기: "none" 또는 (x0, y0, x1, y1). 없으면 일괄 설정대로
         self.known: set[str] = set()      # 중복 추가 방지
         self.results: dict[str, core.Result] = {}
         self.adding = False
@@ -247,6 +276,11 @@ class App:
         self.v_outdir = tk.StringVar(value="")
         self.v_overwrite = tk.BooleanVar(value=False)
         self.v_arc_folder = tk.BooleanVar(value=False)
+        self.v_crop = tk.StringVar(value=CROPS[0][0])
+        self.v_crop_w = tk.StringVar(value="3")
+        self.v_crop_h = tk.StringVar(value="2")
+        self.v_crop_anchor = tk.StringVar(value="center")
+        self.v_crop_flip = tk.BooleanVar(value=True)
         self.v_status = tk.StringVar(value="이미지나 압축 파일을 추가하세요.")
 
     def _cfg_vars(self):
@@ -255,7 +289,8 @@ class App:
             "resize": self.v_resize, "w": self.v_w, "h": self.v_h, "long": self.v_long,
             "pct": self.v_pct, "noup": self.v_noup, "meta": self.v_meta,
             "outmode": self.v_outmode, "outdir": self.v_outdir, "overwrite": self.v_overwrite,
-            "arc_folder": self.v_arc_folder,
+            "arc_folder": self.v_arc_folder, "crop": self.v_crop, "crop_w": self.v_crop_w,
+            "crop_h": self.v_crop_h, "crop_anchor": self.v_crop_anchor, "crop_flip": self.v_crop_flip,
         }
 
     def _load_config(self):
@@ -282,10 +317,11 @@ class App:
         ttk.Button(top, text="파일 추가", command=self.add_files).pack(side="left")
         ttk.Button(top, text="폴더 추가", command=self.add_folder).pack(side="left", padx=4)
         ttk.Button(top, text="선택 삭제", command=self.remove_selected).pack(side="left")
+        ttk.Button(top, text="✂ 개별 자르기", command=self.open_crop_editor).pack(side="left", padx=(4, 0))
         ttk.Button(top, text="목록 비우기", command=self.clear).pack(side="left", padx=4)
         ttk.Button(top, text="도움말·주의사항", command=self.show_help).pack(side="left", padx=4)
         self._qmark(top, "add").pack(side="right", padx=(6, 0))
-        hint = ("파일·폴더·압축 파일(ZIP 등)을 끌어다 놓을 수 있어요" if DND
+        hint = ("파일·폴더·ZIP 끌어다 놓기 가능" if DND
                 else "끌어다 놓기를 쓸 수 없어요 · 위 버튼으로 추가하세요")
         ttk.Label(top, text=hint, foreground="#888").pack(side="right")
 
@@ -309,6 +345,16 @@ class App:
         self.tree.tag_configure("done", foreground="#1e8449")
         self.tree.tag_configure("warn", foreground="#b9770e")
         self.tree.bind("<Double-1>", self._on_double)
+        self.tree.bind("<Return>", lambda e: self.open_crop_editor())
+        self.menu = tk.Menu(self.root, tearoff=0)
+        self.menu.add_command(label="✂ 자르기 조정…", command=self.open_crop_editor)
+        self.menu.add_command(label="이 사진은 자르지 않기", command=lambda: self._set_crop_selected("none"))
+        self.menu.add_command(label="자르기를 일괄 설정대로 되돌리기", command=lambda: self._set_crop_selected(None))
+        self.menu.add_separator()
+        self.menu.add_command(label="결과 파일 위치 열기", command=lambda: self._open_selected(True))
+        self.menu.add_command(label="원본 파일 위치 열기", command=lambda: self._open_selected(False))
+        for seq in (("<Button-2>", "<Control-Button-1>") if IS_MAC else ("<Button-3>",)):
+            self.tree.bind(seq, self._popup)
         self.tree.bind("<Delete>", lambda e: self.remove_selected())
         self.tree.bind("<BackSpace>", lambda e: self.remove_selected())
         if DND:
@@ -369,7 +415,7 @@ class App:
                         command=self._update_mode_widgets).pack(side="left")
         qm(r, "lossless")
 
-        f2 = section(1, "크기 조절", "resize", (6, 6))
+        f2 = section(1, "크기 · 자르기", "resize", (6, 6))
         cb = ttk.Combobox(f2, values=[l for l, _ in RESIZE], textvariable=self.v_resize,
                           state="readonly", width=24)
         cb.pack(anchor="w", padx=8, pady=(6, 4))
@@ -379,6 +425,31 @@ class App:
         r = row(f2)
         ttk.Checkbutton(r, text="원본보다 크게 확대하지 않음", variable=self.v_noup).pack(side="left")
         qm(r, "noup")
+        ttk.Separator(f2).pack(fill="x", padx=8, pady=(4, 2))
+        r = row(f2)
+        ttk.Label(r, text="자르기:").pack(side="left")
+        self.cb_crop = ttk.Combobox(r, values=[l for l, _ in CROPS], textvariable=self.v_crop,
+                                    state="readonly", width=17)
+        self.cb_crop.pack(side="left", padx=(4, 0))
+        self.cb_crop.bind("<<ComboboxSelected>>", lambda e: self._update_crop_widgets())
+        qm(r, "crop")
+        self.crop_custom = ttk.Frame(f2)
+        ttk.Entry(self.crop_custom, textvariable=self.v_crop_w, width=5, justify="right").pack(side="left")
+        ttk.Label(self.crop_custom, text=":").pack(side="left", padx=2)
+        ttk.Entry(self.crop_custom, textvariable=self.v_crop_h, width=5, justify="right").pack(side="left")
+        ttk.Label(self.crop_custom, text="(가로:세로)", foreground="#888").pack(side="left", padx=4)
+        self.crop_opts = ttk.Frame(f2)
+        r = ttk.Frame(self.crop_opts)
+        r.pack(anchor="w", fill="x")
+        ttk.Label(r, text="위치:").pack(side="left")
+        ttk.Radiobutton(r, text="가운데", value="center", variable=self.v_crop_anchor).pack(side="left", padx=(4, 0))
+        ttk.Radiobutton(r, text="자동(피사체)", value="smart", variable=self.v_crop_anchor).pack(side="left", padx=(6, 0))
+        self.crop_flip_row = ttk.Frame(self.crop_opts)
+        self.crop_flip_row.pack(anchor="w", fill="x", pady=(2, 0))
+        ttk.Checkbutton(self.crop_flip_row, text="사진 방향에 맞춰 비율 뒤집기",
+                        variable=self.v_crop_flip).pack(side="left")
+        self.crop_hint = ttk.Label(f2, foreground="#888", wraplength=280, justify="left")
+        self._update_crop_widgets()
 
         f3 = section(2, "저장", "save", (6, 0))
         r = row(f3, pady=(4, 0))
@@ -447,11 +518,37 @@ class App:
             entry(self.v_h, "px")
         elif k == "percent":
             entry(self.v_pct, "%")
-        elif k == "fit":
+        elif k in ("fit", "cover"):
             entry(self.v_w, "×")
             entry(self.v_h, "px")
         else:
             ttk.Label(self.rz_row, text="해상도를 바꾸지 않습니다", foreground="#888").pack(side="left")
+        if hasattr(self, "cb_crop"):
+            self._update_crop_widgets()
+
+    def _crop_key(self):
+        return dict(CROPS).get(self.v_crop.get())
+
+    def _update_crop_widgets(self):
+        for w in (self.crop_custom, self.crop_opts, self.crop_hint):
+            w.pack_forget()
+        if self._resize_key() == "cover":
+            self.cb_crop.state(["disabled"])
+            self.crop_hint.configure(text="꽉 채우기는 입력한 크기에 맞춰 넘치는 부분을 자릅니다. 자르는 위치:")
+            self.crop_hint.pack(anchor="w", padx=8)
+            self.crop_flip_row.pack_forget()  # 꽉 채우기는 항상 입력한 가로×세로 그대로
+            self.crop_opts.pack(anchor="w", fill="x", padx=8, pady=(0, 4))
+            return
+        self.cb_crop.state(["!disabled"])
+        self.crop_flip_row.pack(anchor="w", fill="x", pady=(2, 0))
+        k = self._crop_key()
+        if k == "custom":
+            self.crop_custom.pack(anchor="w", padx=60, pady=(0, 2))
+        if k:
+            self.crop_opts.pack(anchor="w", fill="x", padx=8, pady=(0, 4))
+        else:
+            self.crop_hint.configure(text="사진별로 자르려면 목록에서 더블클릭하세요.")
+            self.crop_hint.pack(anchor="w", padx=8, pady=(0, 4))
 
     # ------------------------------------------------------------ 안내·경고
     def _qmark(self, parent, topic):
@@ -632,6 +729,7 @@ class App:
             if it:
                 self.known.discard(it["key"])
             self.results.pop(iid, None)
+            self.crops.pop(iid, None)
         self._update_count()
 
     def clear(self):
@@ -641,6 +739,7 @@ class App:
         self.items.clear()
         self.known.clear()
         self.results.clear()
+        self.crops.clear()
         self.pb["value"] = 0
         self._update_count()
 
@@ -653,10 +752,15 @@ class App:
 
     def _on_double(self, event):
         iid = self.tree.identify_row(event.y)
-        r = self.results.get(iid)
+        if not iid or iid not in self.items:
+            return
+        if self.items[iid]["kind"] == "file" and not self.running:
+            self.open_crop_editor(iid)  # 사진: 개별 자르기
+            return
+        r = self.results.get(iid)  # 압축 파일: 결과 위치 열기
         if r and r.dst:
             open_in_file_manager(r.dst)
-        elif iid in self.items:
+        else:
             open_in_file_manager(self.items[iid]["path"])
 
     def open_output(self):
@@ -700,11 +804,101 @@ class App:
             s.height = num(self.v_h, "세로")
         if k == "percent":
             s.percent = num(self.v_pct, "비율", 1, 1000, float)
+        if k == "cover":
+            s.width, s.height = num(self.v_w, "가로"), num(self.v_h, "세로")
+        self._apply_crop_settings(s, num)
         if self.v_outmode.get() == "dir":
             if not self.v_outdir.get():
                 raise ValueError("저장할 폴더를 선택하세요.")
             s.output_dir = self.v_outdir.get()
         return s
+
+    def _apply_crop_settings(self, s: core.Settings, num):
+        c = self._crop_key()
+        if c == "custom":
+            c = (num(self.v_crop_w, "자르기 비율 가로", 1, 1000), num(self.v_crop_h, "자르기 비율 세로", 1, 1000))
+        s.crop_ratio = c if self._resize_key() != "cover" else None
+        s.crop_anchor = self.v_crop_anchor.get()
+        s.crop_flip_portrait = self.v_crop_flip.get()
+
+    def _crop_settings(self) -> core.Settings:
+        """개별 자르기 창에서 '일괄 설정대로' 영역을 보여주기 위한 설정 (입력 오류가 있으면 자르기 없음)."""
+        s = core.Settings(resize_mode=self._resize_key())
+
+        def num(var, name, lo=1, hi=100000, cast=int):
+            v = cast(str(var.get()).strip())
+            if not lo <= v <= hi:
+                raise ValueError(name)
+            return v
+        try:
+            if s.resize_mode == "cover":
+                s.width, s.height = num(self.v_w, "w"), num(self.v_h, "h")
+            self._apply_crop_settings(s, num)
+        except ValueError:
+            s = core.Settings()
+        return s
+
+    # ------------------------------------------------------------ 개별 자르기
+    def _file_rows(self) -> list:
+        return [i for i in self.tree.get_children() if self.items.get(i, {}).get("kind") == "file"]
+
+    def open_crop_editor(self, iid=None):
+        if self.running or self.adding:
+            return
+        rows = self._file_rows()
+        if not rows:
+            messagebox.showinfo(APP_NAME, "자를 이미지를 먼저 추가하세요. (압축 파일 안의 이미지는 일괄 설정만 적용됩니다)")
+            return
+        if iid is None:
+            sel = [i for i in self.tree.selection() if i in rows]
+            iid = sel[0] if sel else rows[0]
+        if iid not in rows:
+            messagebox.showinfo(APP_NAME, "압축 파일 안의 이미지는 개별로 자를 수 없습니다. (일괄 설정은 적용됩니다)")
+            return
+        entries = [(i, self.items[i]["path"]) for i in rows]
+        CropEditor(self.root, entries, rows.index(iid), self.crops.get, self._set_crop, self._crop_settings())
+
+    def _set_crop(self, iid, value):
+        if value is None:
+            self.crops.pop(iid, None)
+        else:
+            self.crops[iid] = value
+        self._refresh_row(iid)
+
+    def _set_crop_selected(self, value):
+        if self.running:
+            return
+        for iid in self.tree.selection():
+            if self.items.get(iid, {}).get("kind") == "file":
+                self._set_crop(iid, value)
+
+    def _refresh_row(self, iid):
+        if not self.tree.exists(iid) or iid not in self.items:
+            return
+        it = self.items[iid]
+        st = self.crops.get(iid)
+        self.tree.set(iid, "name", ("✂ " if isinstance(st, tuple) else "") + it["path"].name)
+        if not self.running and iid not in self.results:
+            self.tree.set(iid, "status", "대기" + (" · ✂ 직접 지정" if isinstance(st, tuple)
+                                                  else " · 자르지 않음" if st == "none" else ""))
+
+    def _popup(self, e):
+        iid = self.tree.identify_row(e.y)
+        if iid:
+            if iid not in self.tree.selection():
+                self.tree.selection_set(iid)
+            self.menu.tk_popup(e.x_root, e.y_root)
+
+    def _open_selected(self, result: bool):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        r = self.results.get(iid)
+        if result and r and r.dst:
+            open_in_file_manager(r.dst)
+        elif iid in self.items:
+            open_in_file_manager(self.items[iid]["path"])
 
     def start(self):
         if self.running:
@@ -746,10 +940,11 @@ class App:
                 self.tree.set(iid, col, "")
             self.tree.set(iid, "status", "대기")
         self.v_status.set(f"변환 중… 0 / {self.total_units:,}장")
-        threading.Thread(target=self._run, args=(jobs, s, self.v_arc_folder.get()), daemon=True).start()
+        threading.Thread(target=self._run, args=(jobs, s, self.v_arc_folder.get(), dict(self.crops)),
+                         daemon=True).start()
 
     # 백그라운드: 모든 CPU 코어로 처리 (Pillow 인코더는 GIL 을 풀기 때문에 스레드로 충분히 병렬화됨)
-    def _run(self, jobs, s, arc_folder):
+    def _run(self, jobs, s, arc_folder, crops):
         post = self.q.put
         workers = core.cpu_workers()
         core.set_big_image_limit(2)
@@ -764,7 +959,7 @@ class App:
                 post(("skip", iid, None))
                 return
             post(("start", iid, None))
-            post(("done", iid, core.convert(path, s)))
+            post(("done", iid, core.convert(path, s, crop=crops.get(iid))))
 
         def arch_task(iid, job, i, st):
             r = None if self.cancel.is_set() else job.run_task(i)
