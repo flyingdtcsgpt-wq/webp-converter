@@ -215,6 +215,7 @@ python app.py
 | `app.py` | GUI (tkinter) |
 | `webp_core.py` | 변환 엔진 (자르기, 리사이즈, 스마트 최적화, 메타데이터 처리) |
 | `crop_editor.py` | 개별 자르기 미리보기 창 |
+| `docs/INTEGRATION.md` | **다른 프로그램(뷰어 등)에 넣기 위한 연동·이식 가이드** (알고리즘·수치·API) |
 | `build_windows.bat` / `build_mac.sh` | 포터블 실행 파일 빌드 스크립트 (PyInstaller) |
 | `installer.iss` | Windows 설치 파일 설정 (Inno Setup) |
 | `PORTABLE.txt` | 배포 압축 파일에 `사용법.txt`로 들어가는 안내문 |

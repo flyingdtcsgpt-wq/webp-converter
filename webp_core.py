@@ -928,18 +928,39 @@ def _convert_image(im: Image.Image, src: Path, s: Settings, res: Result, crop=No
     cw = max(1, round(orig_size[0] * (box[2] - box[0]))) if box else orig_size[0]
     ch = max(1, round(orig_size[1] * (box[3] - box[1]))) if box else orig_size[1]
     img = _resize(img, target_size(cw, ch, s))
-    new_size = img.size
     lossless_src = src.suffix.lower() in LOSSLESS_SOURCE_EXTS
+    data, detail = _encode_prepared(img, s, extra, lossless_src, res.orig_bytes)
+    return data, detail + _crop_label(box, s, crop), img.size, orig_size
+
+
+def _encode_prepared(img: Image.Image, s: Settings, extra: dict, lossless_src: bool,
+                     orig_bytes: int) -> tuple[bytes, str]:
+    """자르기·크기 조절까지 끝난 이미지를 설정대로 인코딩."""
     if s.out_format == "png":
-        data, detail = _convert_png(img, s, extra)
-    elif s.mode == "lossless":
-        data, detail = _lossless(img, extra), "무손실"
-    elif s.mode == "quality":
+        return _convert_png(img, s, extra)
+    if s.mode == "lossless":
+        return _lossless(img, extra), "무손실"
+    if s.mode == "quality":
         q = max(1, min(100, int(s.quality)))
-        data, detail = _lossy(img, extra, q), f"손실 q{q}"
-    else:
-        data, detail = _smart(img, extra, s.smart_level, lossless_src, res.orig_bytes)
-    return data, detail + _crop_label(box, s, crop), new_size, orig_size
+        return _lossy(img, extra, q), f"손실 q{q}"
+    return _smart(img, extra, s.smart_level, lossless_src, orig_bytes)
+
+
+def encode_image(img: Image.Image, s: Settings, crop=None, lossless_source: bool = False,
+                 metadata_from: Optional[Image.Image] = None) -> tuple[bytes, str, tuple]:
+    """메모리에 있는 이미지 한 장을 변환해 (파일 데이터, 설명, 결과 크기) 를 돌려준다. (뷰어 연동용)
+    - img 는 화면에 보이는 방향 그대로라고 본다 (EXIF 회전은 적용하지 않음. 필요하면 ImageOps.exif_transpose 먼저)
+    - crop: None = 설정대로, "none" = 자르지 않음, (x0, y0, x1, y1) = 0~1 비율 좌표
+    - lossless_source: 원본이 PNG·스크린샷처럼 무손실이면 True (무손실 WebP 와도 비교)
+    - metadata_from: EXIF·ICC 를 가져올 원본 이미지 (s.keep_metadata 일 때). 없으면 img 에서 가져옴
+    움직이는 이미지는 첫 장면만 변환한다 (전체 변환은 convert() 사용). 파일 저장은 호출하는 쪽에서."""
+    extra = _metadata(metadata_from or img, s.keep_metadata)
+    img = _normalize_mode(img)
+    box = None if crop == "none" else (crop if isinstance(crop, tuple) else auto_crop_box(img, s))
+    img = _apply_crop(img, box)
+    img = _resize(img, target_size(*img.size, s))
+    data, detail = _encode_prepared(img, s, extra, lossless_source, 0)
+    return data, detail + _crop_label(box, s, crop), img.size
 
 
 def _convert_animated(im: Image.Image, s: Settings, extra: dict, crop=None):
